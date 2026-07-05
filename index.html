@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardware Key File Encryptor/Decryptor</title>
+    <style>
+        :root {
+            --bg-color: #f4f4f9;
+            --container-bg: #ffffff;
+            --text-color: #333333;
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --secondary: #10b981;
+            --secondary-hover: #059669;
+            --danger: #dc2626;
+            --danger-hover: #b91c1c;
+            --warning: #f59e0b;
+            --border: #d1d5db;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .container, .viewer-container {
+            background-color: var(--container-bg);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 500px;
+            margin-bottom: 20px;
+        }
+
+        .viewer-container {
+            max-width: 900px;
+            display: none;
+        }
+
+        h2, h3 {
+            margin-top: 0;
+            text-align: center;
+            color: #111827;
+        }
+
+        .warning-box {
+            background-color: #fef3c7;
+            border-left: 4px solid var(--warning);
+            padding: 10px;
+            margin-bottom: 20px;
+            font-size: 0.85em;
+            color: #92400e;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+
+        input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        #registerBtn { background-color: #1f2937; width: 100%; margin-bottom: 20px; }
+        #registerBtn:hover { background-color: #111827; }
+
+        #encryptBtn { background-color: var(--primary); }
+        #encryptBtn:hover { background-color: var(--primary-hover); }
+        
+        #decryptBtn { background-color: var(--secondary); }
+        #decryptBtn:hover { background-color: var(--secondary-hover); }
+
+        #clearBtn {
+            background-color: var(--danger);
+            margin-bottom: 15px;
+            width: 100%;
+        }
+        #clearBtn:hover { background-color: var(--danger-hover); }
+
+        button:disabled {
+            background-color: #9ca3af !important;
+            cursor: not-allowed;
+        }
+
+        #status {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 0.9em;
+            word-break: break-word;
+        }
+
+        .success { color: #059669; }
+        .error { color: #dc2626; }
+        .working { color: #4b5563; }
+
+        /* Viewer Styles */
+        #viewerContent {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #f9fafb;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            min-height: 200px;
+            overflow: auto;
+        }
+        #viewerContent img, #viewerContent video { max-width: 100%; height: auto; border-radius: 4px; }
+        #viewerContent iframe { width: 100%; height: 600px; border: none; }
+        #viewerContent pre { width: 100%; white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Hardware Key File Tool</h2>
+    
+    <div class="warning-box" id="protocolWarning" style="display: none;">
+        <strong>Warning:</strong> You are opening this via the `file://` protocol. Hardware keys require a Secure Context (localhost or HTTPS). This app will likely fail until you run it on a local web server.
+    </div>
+
+    <div>
+        <label>Step 1: Link your hardware key (First time only)</label>
+        <button id="registerBtn">Register Hardware Key</button>
+    </div>
+    
+    <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 20px 0;">
+
+    <div class="form-group">
+        <label for="fileInput">Step 2: Select File</label>
+        <input type="file" id="fileInput">
+    </div>
+
+    <div class="button-group">
+        <button id="encryptBtn">Encrypt & Download</button>
+        <button id="decryptBtn">Decrypt to RAM</button>
+    </div>
+
+    <div id="status"></div>
+</div>
+
+<div class="viewer-container" id="viewerContainer">
+    <h3>Decrypted File Viewer</h3>
+    <button id="clearBtn">Clear Memory & Close Viewer</button>
+    <div id="viewerContent"></div>
+</div>
+
+<script>
+    // Constants for Cryptography
+    const SALT_LENGTH = 16;
+    const IV_LENGTH = 12;
+    
+    // This is the static salt provided to the Hardware Key PRF extension to generate the master key.
+    // It must be exactly 32 bytes long. Do not change this after encrypting files, or they will be lost.
+    const PRF_SALT = new TextEncoder().encode("LocalFileEncryptionAppSalt_00000"); 
+
+    const fileInput = document.getElementById('fileInput');
+    const registerBtn = document.getElementById('registerBtn');
+    const encryptBtn = document.getElementById('encryptBtn');
+    const decryptBtn = document.getElementById('decryptBtn');
+    const statusDiv = document.getElementById('status');
+    const viewerContainer = document.getElementById('viewerContainer');
+    const viewerContent = document.getElementById('viewerContent');
+    const clearBtn = document.getElementById('clearBtn');
+
+    let currentBlobUrl = null;
+
+    // Check for Secure Context
+    if (window.location.protocol === 'file:') {
+        document.getElementById('protocolWarning').style.display = 'block';
+    }
+
+    function setStatus(message, type = 'working') {
+        statusDiv.textContent = message;
+        statusDiv.className = type;
+    }
+
+    function toggleButtons(disabled) {
+        encryptBtn.disabled = disabled;
+        decryptBtn.disabled = disabled;
+        registerBtn.disabled = disabled;
+    }
+
+    // Guess MIME type based on file extension
+    function getMimeType(filename) {
+        const ext = filename.split('.').pop().toLowerCase();
+        const mimeTypes = {
+            'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp',
+            'txt': 'text/plain', 'json': 'application/json', 'csv': 'text/csv', 'html': 'text/html', 'md': 'text/markdown',
+            'pdf': 'application/pdf', 'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+            'mp4': 'video/mp4', 'webm': 'video/webm'
+        };
+        return mimeTypes[ext] || 'application/octet-stream';
+    }
+
+    // Derive a unique AES-GCM key per file using HKDF based on the Hardware Key's PRF Output
+    async function deriveKeyFromPRF(prfOutputBuffer, fileSalt) {
+        const keyMaterial = await window.crypto.subtle.importKey(
+            "raw", prfOutputBuffer, { name: "HKDF" }, false, ["deriveKey"]
+        );
+
+        return window.crypto.subtle.deriveKey(
+            { name: "HKDF", salt: fileSalt, info: new Uint8Array(), hash: "SHA-256" },
+            keyMaterial, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+        );
+    }
+
+    // Step 1: Register Hardware Key (Creates a Discoverable Credential)
+    registerBtn.addEventListener('click', async () => {
+        try {
+            toggleButtons(true);
+            setStatus('Follow your browser/hardware key prompts to register...', 'working');
+
+            const challenge = window.crypto.getRandomValues(new Uint8Array(32));
+            const userId = window.crypto.getRandomValues(new Uint8Array(16));
+
+            await navigator.credentials.create({
+                publicKey: {
+                    challenge: challenge,
+                    rp: { name: "Local Hardware Encryptor" },
+                    user: { id: userId, name: "local-user", displayName: "Local User" },
+                    pubKeyCredParams: [{ alg: -7, type: "public-key" }, { alg: -257, type: "public-key" }],
+                    authenticatorSelection: {
+                        userVerification: "required",
+                        residentKey: "required" // Forces key to store the credential (Passkey)
+                    },
+                    extensions: {
+                        prf: { eval: { first: PRF_SALT } }
+                    }
+                }
+            });
+
+            setStatus('Hardware Key registered successfully! You can now encrypt/decrypt.', 'success');
+        } catch (error) {
+            console.error(error);
+            setStatus(`Registration failed: ${error.message}. Ensure your key supports PRF.`, 'error');
+        } finally {
+            toggleButtons(false);
+        }
+    });
+
+    // Request Hardware Key for PRF Output
+    async function getHardwareKeyMasterMaterial() {
+        const challenge = window.crypto.getRandomValues(new Uint8Array(32));
+        
+        const assertion = await navigator.credentials.get({
+            publicKey: {
+                challenge: challenge,
+                userVerification: "required",
+                extensions: {
+                    prf: { eval: { first: PRF_SALT } }
+                }
+            }
+        });
+
+        const extensionResults = assertion.getClientExtensionResults();
+        if (!extensionResults.prf || !extensionResults.prf.results || !extensionResults.prf.results.first) {
+            throw new Error("Your hardware key or browser does not support the WebAuthn PRF extension required for cryptography.");
+        }
+
+        return extensionResults.prf.results.first;
+    }
+
+    // File Download Helper
+    function downloadFile(data, filename) {
+        const blob = new Blob([data], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    // Encrypt Logic
+    encryptBtn.addEventListener('click', async () => {
+        const file = fileInput.files[0];
+        if (!file) return setStatus('Please select a file first.', 'error');
+
+        try {
+            toggleButtons(true);
+            setStatus('Tap your hardware key to authorize encryption...', 'working');
+
+            // 1. Get Master Material from Hardware Key
+            const masterPrfMaterial = await getHardwareKeyMasterMaterial();
+            
+            setStatus('Encrypting... please wait.', 'working');
+
+            // 2. Generate unique per-file Cryptographic parameters
+            const fileBuffer = await file.arrayBuffer();
+            const fileSalt = window.crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
+            const iv = window.crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+            
+            // 3. Derive File Key and Encrypt
+            const key = await deriveKeyFromPRF(masterPrfMaterial, fileSalt);
+            const encryptedContent = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv: iv }, key, fileBuffer
+            );
+
+            // 4. Combine and Download
+            const combinedData = new Uint8Array(fileSalt.length + iv.length + encryptedContent.byteLength);
+            combinedData.set(fileSalt, 0);
+            combinedData.set(iv, fileSalt.length);
+            combinedData.set(new Uint8Array(encryptedContent), fileSalt.length + iv.length);
+
+            downloadFile(combinedData, file.name + '.enc');
+            setStatus('File encrypted and downloaded successfully!', 'success');
+        } catch (error) {
+            console.error(error);
+            setStatus(`Encryption failed: ${error.message}`, 'error');
+        } finally {
+            toggleButtons(false);
+        }
+    });
+
+    // Decrypt Logic
+    decryptBtn.addEventListener('click', async () => {
+        const file = fileInput.files[0];
+        if (!file) return setStatus('Please select a file first.', 'error');
+
+        try {
+            toggleButtons(true);
+            clearMemory();
+            setStatus('Tap your hardware key to authorize decryption...', 'working');
+
+            // 1. Get Master Material from Hardware Key
+            const masterPrfMaterial = await getHardwareKeyMasterMaterial();
+            
+            setStatus('Decrypting into memory...', 'working');
+
+            // 2. Read File and Extract Parameters
+            const fileBuffer = await file.arrayBuffer();
+            if (fileBuffer.byteLength < SALT_LENGTH + IV_LENGTH) {
+                throw new Error("File is too small to be a valid encrypted file.");
+            }
+            const fileSalt = new Uint8Array(fileBuffer.slice(0, SALT_LENGTH));
+            const iv = new Uint8Array(fileBuffer.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH));
+            const encryptedContent = fileBuffer.slice(SALT_LENGTH + IV_LENGTH);
+
+            // 3. Derive File Key and Decrypt
+            const key = await deriveKeyFromPRF(masterPrfMaterial, fileSalt);
+            const decryptedContent = await window.crypto.subtle.decrypt(
+                { name: "AES-GCM", iv: iv }, key, encryptedContent
+            );
+
+            // 4. Render to Viewer
+            const origName = file.name.replace(/\.enc$/, '');
+            const mimeType = getMimeType(origName);
+            const blob = new Blob([decryptedContent], { type: mimeType });
+            currentBlobUrl = URL.createObjectURL(blob);
+
+            if (mimeType.startsWith('image/')) {
+                viewerContent.innerHTML = `<img src="${currentBlobUrl}" alt="Decrypted Image">`;
+            } else if (mimeType.startsWith('video/')) {
+                viewerContent.innerHTML = `<video src="${currentBlobUrl}" controls autoplay></video>`;
+            } else if (mimeType.startsWith('audio/')) {
+                viewerContent.innerHTML = `<audio src="${currentBlobUrl}" controls></audio>`;
+            } else if (mimeType.startsWith('text/') || mimeType === 'application/json') {
+                const text = await blob.text();
+                viewerContent.innerHTML = `<pre>${text.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`;
+            } else {
+                viewerContent.innerHTML = `<iframe src="${currentBlobUrl}"></iframe>`;
+            }
+
+            viewerContainer.style.display = 'block';
+            setStatus('File decrypted securely using Hardware Key!', 'success');
+        } catch (error) {
+            console.error(error);
+            setStatus(`Decryption failed: Incorrect key, corrupted file, or hardware key error.`, 'error');
+        } finally {
+            toggleButtons(false);
+        }
+    });
+
+    // Cleanup Logic
+    function clearMemory() {
+        if (currentBlobUrl) {
+            URL.revokeObjectURL(currentBlobUrl);
+            currentBlobUrl = null;
+        }
+        viewerContent.innerHTML = '';
+        viewerContainer.style.display = 'none';
+        setStatus('Memory cleared.', 'working');
+    }
+    clearBtn.addEventListener('click', clearMemory);
+</script>
+
+</body>
+</html>

@@ -439,18 +439,23 @@
                 audio.controls = true;
                 viewerContent.appendChild(audio);
             }
-            else if (metadata.mime.startsWith('text/') || metadata.mime === 'application/json') {
+            // UPDATED: Handle CSV and other text-based formats explicitly as text
+            else if (metadata.mime.startsWith('text/') || 
+                     metadata.mime === 'application/json' || 
+                     metadata.mime === 'text/csv') { 
                 const text = await blob.text();
                 const pre = document.createElement('pre');
-                pre.textContent = text; // Safe text injection
+                pre.textContent = text; 
                 viewerContent.appendChild(pre);
             } 
             else {
-                // strict sandbox attribute prevents scripts, forms, and popups inside the rendered decrypted file
-                const iframe = document.createElement('iframe');
-                iframe.src = currentBlobUrl;
-                iframe.setAttribute('sandbox', ''); 
-                viewerContent.appendChild(iframe);
+                // Fallback for PDFs/others
+                const obj = document.createElement('object');
+                obj.data = currentBlobUrl;
+                obj.type = metadata.mime;
+                obj.style.width = "100%";
+                obj.style.height = "100%";
+                viewerContent.appendChild(obj);
             }
 
             modalOverlay.style.display = 'flex';

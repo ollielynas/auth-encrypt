@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Strict Content Security Policy to prevent external script loading or exfiltration -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; media-src blob:; frame-src blob:; connect-src 'none';">
+    <!-- Strict Content Security Policy to prevent external script loading or exfiltration.
+         object-src is explicitly locked down since we no longer use <object>/<embed>. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; media-src blob:; frame-src blob:; object-src 'none'; connect-src 'none';">
     <title>Minimalist Secure File Tool</title>
     <style>
         :root {
@@ -159,12 +160,8 @@
             padding: 20px; overflow: auto; background: var(--light-gray);
         }
         
-        #viewerContent img, #viewerContent video { max-width: 100%; max-height: 100%; object-fit: contain; border: 1px solid var(--border); }
-        
-        /* Sandboxed iframe styling */
+        /* All decrypted content now renders inside a sandboxed iframe */
         #viewerContent iframe { width: 100%; height: 100%; border: 1px solid var(--border); background: var(--bg); }
-        
-        #viewerContent pre { width: 100%; height: 100%; white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0; background: var(--bg); padding: 20px; box-sizing: border-box; border: 1px solid var(--border); }
     </style>
 </head>
 <body>
@@ -351,10 +348,18 @@
 
             await uiYield('Encrypting Payload...', 'working');
             const fileBuffer = await selectedFile.arrayBuffer();
-            const encryptedFileData = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: fileIv }, dek, fileBuffer);
+
+            // The header (filename, mime, salt, IV, wrapped key) is passed as AES-GCM
+            // Additional Authenticated Data. This binds the whole header to the file
+            // ciphertext, so tampering with any header field after the fact (e.g.
+            // swapping `mime` to force a different, more dangerous viewer code path)
+            // causes decryption to fail rather than being silently trusted.
+            const headerBytes = new TextEncoder().encode(JSON.stringify(metadata));
+            const encryptedFileData = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv: fileIv, additionalData: headerBytes }, dek, fileBuffer
+            );
 
             await uiYield('Packaging...', 'working');
-            const headerBytes = new TextEncoder().encode(JSON.stringify(metadata));
             const lengthBuf = new ArrayBuffer(4);
             new DataView(lengthBuf).setUint32(0, headerBytes.length, true); 
 
@@ -408,8 +413,12 @@
             );
 
             const dek = await window.crypto.subtle.importKey("raw", rawDek, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+
+            // headerBytes is supplied as AAD, matching what was used at encryption time.
+            // If the header (including `mime`) was tampered with, this throws here,
+            // before any content ever reaches the viewer.
             const decryptedContent = await window.crypto.subtle.decrypt(
-                { name: "AES-GCM", iv: b642buf(metadata.file_iv) }, dek, encryptedFileBytes
+                { name: "AES-GCM", iv: b642buf(metadata.file_iv), additionalData: headerBytes }, dek, encryptedFileBytes
             );
 
             const blob = new Blob([decryptedContent], { type: metadata.mime });
@@ -419,44 +428,7 @@
             currentDecryptedName = metadata.filename;
             viewerTitle.textContent = `VIEWING: ${metadata.filename}`;
 
-            viewerContent.innerHTML = ''; // Clear previous content safely
-            
-            if (metadata.mime.startsWith('image/')) {
-                const img = document.createElement('img');
-                img.src = currentBlobUrl;
-                viewerContent.appendChild(img);
-            }
-            else if (metadata.mime.startsWith('video/')) {
-                const video = document.createElement('video');
-                video.src = currentBlobUrl;
-                video.controls = true;
-                video.autoplay = true;
-                viewerContent.appendChild(video);
-            }
-            else if (metadata.mime.startsWith('audio/')) {
-                const audio = document.createElement('audio');
-                audio.src = currentBlobUrl;
-                audio.controls = true;
-                viewerContent.appendChild(audio);
-            }
-            // UPDATED: Handle CSV and other text-based formats explicitly as text
-            else if (metadata.mime.startsWith('text/') || 
-                     metadata.mime === 'application/json' || 
-                     metadata.mime === 'text/csv') { 
-                const text = await blob.text();
-                const pre = document.createElement('pre');
-                pre.textContent = text; 
-                viewerContent.appendChild(pre);
-            } 
-            else {
-                // Fallback for PDFs/others
-                const obj = document.createElement('object');
-                obj.data = currentBlobUrl;
-                obj.type = metadata.mime;
-                obj.style.width = "100%";
-                obj.style.height = "100%";
-                viewerContent.appendChild(obj);
-            }
+            await renderInSandbox(metadata.mime, blob);
 
             modalOverlay.style.display = 'flex';
             await uiYield('[ SUCCESS ] File Decrypted', 'success');
@@ -469,6 +441,56 @@
             toggleButtons(false); 
         }
     });
+
+    // Renders decrypted content inside a sandboxed <iframe> instead of directly in the
+    // page's own DOM. The sandbox uses `allow-same-origin` (so it can still load the
+    // blob: URL, which is origin-scoped) but deliberately omits `allow-scripts`,
+    // `allow-forms`, `allow-popups`, and `allow-top-navigation`. That means:
+    //   - Any <script> embedded in a decrypted file (e.g. an HTML file, or an SVG with
+    //     an inline script masquerading as an image) cannot execute.
+    //   - Even if `metadata.mime` were wrong or spoofed, the frame content still can't
+    //     run script or navigate the parent page — unlike the previous <object> element,
+    //     which rendered untyped content directly in the parent document's own context.
+    // This replaces per-type trust decisions (img/video/audio/pre/object) with one
+    // consistent isolation boundary that holds regardless of what the content turns out
+    // to actually be.
+    async function renderInSandbox(mime, blob) {
+        viewerContent.innerHTML = '';
+        const iframe = document.createElement('iframe');
+        iframe.setAttribute('sandbox', 'allow-same-origin');
+        iframe.setAttribute('referrerpolicy', 'no-referrer');
+
+        if (mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/')) {
+            let tag;
+            if (mime.startsWith('image/')) tag = `<img src="${currentBlobUrl}" alt="preview">`;
+            else if (mime.startsWith('video/')) tag = `<video src="${currentBlobUrl}" controls autoplay></video>`;
+            else tag = `<audio src="${currentBlobUrl}" controls></audio>`;
+
+            iframe.srcdoc = `<!DOCTYPE html><html><head><meta charset="utf-8">
+                <meta http-equiv="Content-Security-Policy" content="default-src blob:; script-src 'none'; object-src 'none'; style-src 'unsafe-inline';">
+                <style>html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center;background:#f5f5f5;overflow:auto;}
+                img,video{max-width:100%;max-height:100%;object-fit:contain;}audio{width:90%;}</style></head>
+                <body>${tag}</body></html>`;
+        } else if (mime.startsWith('text/') || mime === 'application/json') {
+            const text = await blob.text();
+            const escaped = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            iframe.srcdoc = `<!DOCTYPE html><html><head><meta charset="utf-8">
+                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline';">
+                <style>body{margin:0;padding:20px;box-sizing:border-box;font-family:monospace;white-space:pre-wrap;word-wrap:break-word;background:#fff;color:#000;}</style></head>
+                <body>${escaped}</body></html>`;
+        } else {
+            // Fallback for PDFs and any other/unknown type: load the blob directly in
+            // the sandboxed frame instead of an <object> element. Script execution is
+            // still blocked by the sandbox regardless of the file's real content or a
+            // spoofed mime value.
+            iframe.src = currentBlobUrl;
+        }
+
+        viewerContent.appendChild(iframe);
+    }
 
     // Download Decrypted File
     downloadViewerBtn.addEventListener('click', async () => {

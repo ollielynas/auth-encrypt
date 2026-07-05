@@ -255,6 +255,27 @@
     function buf2b64(buf) { return btoa(String.fromCharCode.apply(null, new Uint8Array(buf))); }
     function b642buf(b64) { return new Uint8Array(atob(b64).split('').map(c => c.charCodeAt(0))); }
 
+    // WebAuthn throws generic DOMExceptions whose .message is deliberately vague
+    // ("The operation failed for an operation-specific reason") for privacy reasons.
+    // .name is far more informative — surface it with an actionable hint instead.
+    function describeAuthError(error) {
+        if (!(error instanceof DOMException)) return error.message;
+        switch (error.name) {
+            case 'NotAllowedError':
+                return 'No matching hardware key found for this exact site, the prompt was cancelled, or it timed out. Make sure you are on the same origin where you ran "Register Key", and complete the fingerprint/PIN/touch/security-key prompt when it appears.';
+            case 'InvalidStateError':
+                return 'This hardware key is already registered for this site.';
+            case 'SecurityError':
+                return 'This page is not running in a secure context (HTTPS or localhost is required for hardware keys).';
+            case 'NotSupportedError':
+                return 'This browser or authenticator does not support the required PRF extension.';
+            case 'AbortError':
+                return 'The hardware key operation was aborted or timed out.';
+            default:
+                return `${error.name}: ${error.message}`;
+        }
+    }
+
     // Drag & Drop Logic
     dropZone.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (e) => handleFileSelect(e.target.files[0]));
@@ -308,7 +329,8 @@
             });
             await uiYield('[ SUCCESS ] Hardware Key Linked', 'success');
         } catch (error) {
-            await uiYield(`[ ERROR ] ${error.message}`, 'error');
+            console.error(error);
+            await uiYield(`[ ERROR ] ${describeAuthError(error)}`, 'error');
         } finally { toggleButtons(false); }
     });
 
@@ -372,7 +394,7 @@
             await uiYield('[ SUCCESS ] File Encrypted', 'success');
         } catch (error) {
             console.error(error);
-            await uiYield(`[ ERROR ] ${error.message}`, 'error');
+            await uiYield(`[ ERROR ] ${describeAuthError(error)}`, 'error');
         } finally { 
             wipeMemory(rawDek);
             wipeMemory(hwPrf);
@@ -432,7 +454,7 @@
             await uiYield('[ SUCCESS ] File Decrypted', 'success');
         } catch (error) {
             console.error(error);
-            await uiYield(`[ ERROR ] ${error.message}`, 'error');
+            await uiYield(`[ ERROR ] ${describeAuthError(error)}`, 'error');
         } finally { 
             wipeMemory(rawDek);
             wipeMemory(hwPrf);
@@ -505,7 +527,8 @@
             document.body.appendChild(a); a.click(); document.body.removeChild(a);
             
         } catch (err) {
-            alert(`[ ERROR ] ${err.message}`);
+            console.error(err);
+            alert(`[ ERROR ] ${describeAuthError(err)}`);
         } finally {
             downloadViewerBtn.textContent = "DOWNLOAD";
             downloadViewerBtn.disabled = false;

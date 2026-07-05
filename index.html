@@ -239,10 +239,32 @@
     }
 
     function toggleButtons(disabled) {
-        encryptBtn.disabled = disabled;
-        decryptBtn.disabled = disabled;
         registerBtn.disabled = disabled;
+        if (disabled) {
+            encryptBtn.disabled = true;
+            decryptBtn.disabled = true;
+        } else {
+            applyFileModeButtons();
+        }
     }
+
+    // Enable only the action that matches the selected file: .enc files can only be
+    // decrypted, everything else can only be encrypted. Prevents mismatched clicks
+    // (e.g. trying to "encrypt" an already-encrypted .enc file).
+    function applyFileModeButtons() {
+        if (!selectedFile) {
+            encryptBtn.disabled = true;
+            decryptBtn.disabled = true;
+            return;
+        }
+        const isEncryptedFile = selectedFile.name.toLowerCase().endsWith('.enc');
+        encryptBtn.disabled = isEncryptedFile;
+        decryptBtn.disabled = !isEncryptedFile;
+    }
+
+    // No file selected yet — nothing to encrypt or decrypt.
+    encryptBtn.disabled = true;
+    decryptBtn.disabled = true;
 
     // Secure Memory Wiper (Zeroes out ArrayBuffers before garbage collection)
     function wipeMemory(buffer) {
@@ -291,6 +313,7 @@
         if (!file) return;
         selectedFile = file;
         dropZoneText.innerHTML = `SELECTED: <br>${file.name} <br>(${(file.size / 1024 / 1024).toFixed(2)} MB)`;
+        applyFileModeButtons();
     }
 
     // Crypto Keys Generation
